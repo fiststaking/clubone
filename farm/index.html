@@ -1,0 +1,163 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"/><link rel="icon" href="./favicon.ico"/><meta name="viewport" content="width=device-width,initial-scale=1"/><meta name="theme-color" content="#070c16"/><meta name="description" content="FIST 生态农场：基于 BNB Smart Chain 的链上单双竞猜协议，猜中 1.95 倍，支持多代币与团队级差奖励。"/><link rel="apple-touch-icon" href="./logo192.png"/><link rel="manifest" href="./manifest.json"/><title>FIST 生态农场 · 链上单双竞猜</title><script>
+/* ══ BSC RPC 通道白名单 + 自动故障转移 ══════════════════════════════════════
+   通道来源: warstaking 实测白名单 (国内直连优先, 海外镜像兜底), 已逐个实测
+   eth_chainId == 0x38。策略与上游一致: 并行探测延迟 → 升序排名 → 失败自动切下一通道。
+   ⚠️ 避坑: 原产物把 RPC 写死为单个 bsc-dataseed.binance.org 且回退到自己(等于无回退),
+      该节点按 IP 限流, 一旦抖动整页读不出数据。此处仅接管「只读」调用;
+      下注/授权/签名等写操作仍然走 window.ethereum, 私钥与签名不离开钱包。 */
+(function () {
+  'use strict';
+  var CHAIN_ID = '0x38';
+  var PROBE_MS = 2500;
+  var CALL_MS = 8000;
+  var BAD_MS = 60000;
+  var CACHE_KEY = 'fistfarm.rpc.rank.v1';
+  var CACHE_TTL = 5 * 60 * 1000;
+
+  var ENDPOINTS = [
+    { n: 'TokenPocket', u: 'https://bsc.mytokenpocket.vip' },
+    { n: '48Club',      u: 'https://rpc-bsc.48.club' },
+    { n: 'BNB Chain',   u: 'https://bsc-dataseed.bnbchain.org' },
+    { n: 'defibit2',    u: 'https://bsc-dataseed2.defibit.io' },
+    { n: 'defibit3',    u: 'https://bsc-dataseed3.defibit.io' },
+    { n: 'defibit4',    u: 'https://bsc-dataseed4.defibit.io' },
+    { n: '1RPC',        u: 'https://1rpc.io/bnb' },
+    { n: 'PublicNode',  u: 'https://bsc-rpc.publicnode.com' },
+    { n: 'BlastAPI',    u: 'https://bsc-mainnet.public.blastapi.io' },
+    { n: 'MeowRPC',     u: 'https://bsc.meowrpc.com' }
+  ];
+  var NAME = {};
+  ENDPOINTS.forEach(function (e) { NAME[e.u] = e.n; });
+  var ALL = ENDPOINTS.map(function (e) { return e.u; });
+
+  var bad = {};
+  var order = null;
+  var ranking = null;
+  var seq = 1;
+
+  function now() { return Date.now(); }
+  function isBad(u) { return bad[u] && bad[u] > now(); }
+  function rank0() { return (window.performance && window.performance.now) ? window.performance.now() : now(); }
+
+  function rpc(url, method, params, ms) {
+    var ctl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+    var timer = ctl ? setTimeout(function () { try { ctl.abort(); } catch (_) {} }, ms) : null;
+    var opts = {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: seq++, method: method, params: params || [] })
+    };
+    if (ctl) opts.signal = ctl.signal;
+    return fetch(url, opts).then(function (res) {
+      if (timer) { clearTimeout(timer); timer = null; }
+      if (!res.ok) { var e = new Error('HTTP ' + res.status); e.transport = true; throw e; }
+      return res.json();
+    }).then(function (json) {
+      if (json && json.error) {
+        var e2 = new Error(json.error.message || 'RPC error');
+        e2.rpcError = true;
+        e2.code = json.error.code;
+        e2.data = json.error.data;
+        throw e2;
+      }
+      return json ? json.result : undefined;
+    }).catch(function (e) {
+      if (timer) { clearTimeout(timer); timer = null; }
+      if (e && !e.rpcError) e.transport = true;
+      throw e;
+    });
+  }
+
+  function restore() {
+    try {
+      var raw = sessionStorage.getItem(CACHE_KEY);
+      if (!raw) return null;
+      var o = JSON.parse(raw);
+      if (!o || !o.t || (now() - o.t) > CACHE_TTL) return null;
+      if (!Array.isArray(o.o)) return null;
+      var list = o.o.filter(function (u) { return NAME[u]; });
+      return list.length ? list : null;
+    } catch (_) { return null; }
+  }
+
+  function persist(list) {
+    try { sessionStorage.setItem(CACHE_KEY, JSON.stringify({ t: now(), o: list })); } catch (_) {}
+  }
+
+  function rank() {
+    if (ranking) return ranking;
+    ranking = Promise.all(ENDPOINTS.map(function (e) {
+      var t0 = rank0();
+      return rpc(e.u, 'eth_chainId', [], PROBE_MS).then(function (id) {
+        if (String(id).toLowerCase() !== CHAIN_ID) return null;
+        return { u: e.u, ms: rank0() - t0 };
+      }).catch(function () { return null; });
+    })).then(function (rs) {
+      var ok = rs.filter(Boolean).sort(function (a, b) { return a.ms - b.ms; });
+      var list = ok.map(function (x) { return x.u; });
+      ALL.forEach(function (u) { if (list.indexOf(u) < 0) list.push(u); });
+      order = list;
+      persist(list);
+      ranking = null;
+      sync();
+      return list;
+    }).catch(function () { ranking = null; return current(); });
+    return ranking;
+  }
+
+  function current() { return order || restore() || ALL; }
+
+  function send(method, params) {
+    var list = current().filter(function (u) { return !isBad(u); });
+    if (!list.length) list = current();
+    var i = 0;
+    function step() {
+      if (i >= list.length) {
+        var e = new Error('所有 RPC 通道均不可用');
+        e.transport = true;
+        return Promise.reject(e);
+      }
+      var url = list[i++];
+      return rpc(url, method, params, CALL_MS).then(function (r) {
+        return r;
+      }, function (err) {
+        if (err && err.rpcError) throw err;
+        bad[url] = now() + BAD_MS;
+        return step();
+      });
+    }
+    return step();
+  }
+
+  var WALLET_ONLY = /^(eth_requestAccounts|eth_accounts|eth_sendTransaction|eth_sendRawTransaction|eth_sign|personal_sign|eth_signTypedData.*|wallet_.*|eth_subscribe|eth_unsubscribe)$/i;
+
+  var shim = {
+    isFarmRpcShim: true,
+    request: function (payload) {
+      var method = (payload && payload.method) ? String(payload.method) : '';
+      var params = (payload && payload.params) || [];
+      if (WALLET_ONLY.test(method)) {
+        if (window.ethereum && window.ethereum !== shim && typeof window.ethereum.request === 'function') {
+          return window.ethereum.request(payload);
+        }
+        return Promise.reject(new Error('该操作需要钱包: ' + method));
+      }
+      return send(method, params);
+    }
+  };
+
+  function sync() { window.__FARM_RPC_LIST__ = current(); }
+
+  window.__FARM_ETH__ = shim;
+  window.__FARM_RPC_STATUS__ = function () {
+    return {
+      order: current().map(function (u) { return NAME[u] || u; }),
+      bad: Object.keys(bad).filter(isBad).map(function (u) { return NAME[u] || u; })
+    };
+  };
+  sync();
+  rank();
+  setInterval(rank, 120000);
+})();
+</script>
+<script defer="defer" src="./static/js/main.c7fa568f-rpc.js"></script><link href="./static/css/main.c0ab5cf0.css" rel="stylesheet"></head><body><noscript>请启用 JavaScript 后使用本应用。</noscript><div id="root"></div><style>#back-home{position:fixed;left:12px;bottom:12px;z-index:2147483647;display:inline-flex;align-items:center;gap:6px;padding:8px 12px;border-radius:999px;background:rgba(15,118,110,.92);color:#fff;font:600 12px/1 system-ui,-apple-system,"Segoe UI",sans-serif;text-decoration:none;box-shadow:0 6px 18px rgba(0,0,0,.35)}#back-home:hover{background:#0d9488}</style><a id="back-home" href="../" aria-label="返回主站">← 返回主站</a></body></html>
