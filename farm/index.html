@@ -160,7 +160,7 @@
   setInterval(rank, 120000);
 })();
 </script>
-<script defer="defer" src="./static/js/main.9a153ba6.js"></script><link href="./static/css/main.c0ab5cf0.css" rel="stylesheet"></head><body><noscript>请启用 JavaScript 后使用本应用。</noscript><div id="root"></div><style>#back-home{position:fixed;left:12px;bottom:12px;z-index:2147483647;display:inline-flex;align-items:center;gap:6px;padding:8px 12px;border-radius:999px;background:rgba(15,118,110,.92);color:#fff;font:600 12px/1 system-ui,-apple-system,"Segoe UI",sans-serif;text-decoration:none;box-shadow:0 6px 18px rgba(0,0,0,.35)}#back-home:hover{background:#0d9488}</style><a id="back-home" href="../" aria-label="返回主站">← 返回主站</a><script>
+<script defer="defer" src="./static/js/main.25b950d1.js"></script><link href="./static/css/main.c0ab5cf0.css" rel="stylesheet"></head><body><noscript>请启用 JavaScript 后使用本应用。</noscript><div id="root"></div><style>#back-home{position:fixed;left:12px;bottom:12px;z-index:2147483647;display:inline-flex;align-items:center;gap:6px;padding:8px 12px;border-radius:999px;background:rgba(15,118,110,.92);color:#fff;font:600 12px/1 system-ui,-apple-system,"Segoe UI",sans-serif;text-decoration:none;box-shadow:0 6px 18px rgba(0,0,0,.35)}#back-home:hover{background:#0d9488}</style><a id="back-home" href="../" aria-label="返回主站">← 返回主站</a><script>
 /* ══ 推荐关系绑定面板 ══════════════════════════════════════════════════════
    为什么需要这个面板：新版 FarmGuess 的 placeBet() 强制要求 referrer != 0，
    未绑定的地址下注会直接 revert ReferrerRequired()。而 React 产物里没有绑定入口，
@@ -174,11 +174,13 @@
 (function () {
   'use strict';
 
-  var FARM = '0x9a153ba68aB9f70e92a2129ba61Cabf6cE6C4f26';
+  var FARM = '0x25B950D127E4536013A3d014b21A04d1B1646c0B';
   var SEL_SET_REFERRER = '0xa18a7bfc';   // setReferrer(address)
   var SEL_REFERRER = '0x2cf003c2';       // referrer(address)
   var SEL_TEAM = '0x615f36a9';           // getTeamVolume(address)         下线业绩
   var SEL_OWN_TEAM = '0x9933e53b';       // getPersonalPlusTeamVolume(address) 本人+下线
+  var SEL_ROOT_USER = '0xaa3763f7';      // rootUser()  网络根地址，免绑定
+  var SEL_IS_REGISTERED = '0xc3c5a547';  // isRegistered(address) 是否已在树内
 
   function eth() {
     return window.__FARM_ETH__ || window.ethereum || null;
@@ -218,6 +220,17 @@
       return r && r !== '0x' ? BigInt(r) : 0n;
     }).catch(function () { return 0n; });
   }
+  function readAddress(selector, arg) {
+    return call(FARM, selector + (arg ? pad32(arg) : '')).then(function (r) {
+      if (!r || r === '0x') return '0x0000000000000000000000000000000000000000';
+      return '0x' + r.slice(-40);
+    }).catch(function () { return '0x0000000000000000000000000000000000000000'; });
+  }
+  function readBool(selector, arg) {
+    return call(FARM, selector + pad32(arg)).then(function (r) {
+      return !!(r && r !== '0x' && BigInt(r) !== 0n);
+    }).catch(function () { return false; });
+  }
 
   var el, body, statusEl, inputEl, btnEl, hintEl, teamEl, ownEl, toggleEl;
   var account = null;
@@ -246,9 +259,22 @@
         ownEl.textContent = '-';
         return;
       }
-      return readReferrer(account).then(function (up) {
+      return Promise.all([readReferrer(account), readAddress(SEL_ROOT_USER)]).then(function (res) {
+        var up = res[0];
+        var rootUser = res[1];
+        var isRoot = rootUser !== '0x0000000000000000000000000000000000000000'
+          && rootUser.toLowerCase() === account.toLowerCase();
         bound = up && up !== '0x0000000000000000000000000000000000000000' ? up : null;
-        if (bound) {
+
+        if (isRoot) {
+          // The network root is the one address exempt from the binding rule.
+          setStatus('网络根地址（' + account.slice(0, 6) + '…' + account.slice(-4) + '）—— 无需绑定，可直接下注', 'ok');
+          inputEl.value = '';
+          inputEl.disabled = true;
+          btnEl.disabled = true;
+          btnEl.textContent = '根地址无需绑定';
+          hintEl.textContent = '全网第一个地址免绑定；其他地址必须先绑定一个已注册的上级。';
+        } else if (bound) {
           setStatus('已绑定上级：' + bound.slice(0, 6) + '…' + bound.slice(-4), 'ok');
           inputEl.value = '';
           inputEl.disabled = true;
@@ -260,7 +286,7 @@
           inputEl.disabled = false;
           btnEl.disabled = false;
           btnEl.textContent = '绑定上级';
-          hintEl.textContent = '必须先把上级地址绑定到你自己的地址上，才能下注。上级本身也必须已经绑定过上级。';
+          hintEl.textContent = '上级必须已经是树内地址（网络根地址，或已绑定过上级的地址），否则绑定会被拒绝。';
         }
         return Promise.all([
           readVolume(SEL_TEAM, account),
@@ -331,6 +357,7 @@
       var msg = (e && (e.message || (e.data && e.data.message))) || '';
       if (/user rejected|denied/i.test(msg)) msg = '你取消了签名。';
       else if (/TooManyLegs/.test(msg)) msg = '该上级的直推人数已满 50 人（MAX_LEGS），无法再绑定。';
+      else if (/UplineNotRegistered/.test(msg)) msg = '该上级还不是树内地址。请先让他绑定上级，或绑定网络根地址。';
       else if (/ReferrerAlreadySet/.test(msg)) msg = '你已经绑定过上级，不能改绑。';
       else if (/CannotBindDownline/.test(msg)) msg = '不能绑定自己的下级。';
       else if (/SelfReferrer/.test(msg)) msg = '不能绑定自己。';
