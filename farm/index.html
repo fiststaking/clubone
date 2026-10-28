@@ -160,4 +160,270 @@
   setInterval(rank, 120000);
 })();
 </script>
-<script defer="defer" src="./static/js/main.7497b210.js"></script><link href="./static/css/main.c0ab5cf0.css" rel="stylesheet"></head><body><noscript>请启用 JavaScript 后使用本应用。</noscript><div id="root"></div><style>#back-home{position:fixed;left:12px;bottom:12px;z-index:2147483647;display:inline-flex;align-items:center;gap:6px;padding:8px 12px;border-radius:999px;background:rgba(15,118,110,.92);color:#fff;font:600 12px/1 system-ui,-apple-system,"Segoe UI",sans-serif;text-decoration:none;box-shadow:0 6px 18px rgba(0,0,0,.35)}#back-home:hover{background:#0d9488}</style><a id="back-home" href="../" aria-label="返回主站">← 返回主站</a></body></html>
+<script defer="defer" src="./static/js/main.9a153ba6.js"></script><link href="./static/css/main.c0ab5cf0.css" rel="stylesheet"></head><body><noscript>请启用 JavaScript 后使用本应用。</noscript><div id="root"></div><style>#back-home{position:fixed;left:12px;bottom:12px;z-index:2147483647;display:inline-flex;align-items:center;gap:6px;padding:8px 12px;border-radius:999px;background:rgba(15,118,110,.92);color:#fff;font:600 12px/1 system-ui,-apple-system,"Segoe UI",sans-serif;text-decoration:none;box-shadow:0 6px 18px rgba(0,0,0,.35)}#back-home:hover{background:#0d9488}</style><a id="back-home" href="../" aria-label="返回主站">← 返回主站</a><script>
+/* ══ 推荐关系绑定面板 ══════════════════════════════════════════════════════
+   为什么需要这个面板：新版 FarmGuess 的 placeBet() 强制要求 referrer != 0，
+   未绑定的地址下注会直接 revert ReferrerRequired()。而 React 产物里没有绑定入口，
+   所以这里补一个独立面板（只做 setReferrer / referrer 两个调用，不碰游戏逻辑）。
+
+   读写通道：
+     - 读  referrer(address) / 业绩  走 window.__FARM_ETH__（10 通道故障转移池）
+     - 写  setReferrer(address)      走 window.ethereum（私钥不离开钱包）
+   ⚠️ 避坑：不要用 __FARM_ETH__ 发 eth_sendTransaction 以外的自定义方法；shim 只把
+      钱包专属方法（含 eth_sendTransaction）透传给 window.ethereum。 */
+(function () {
+  'use strict';
+
+  var FARM = '0x9a153ba68aB9f70e92a2129ba61Cabf6cE6C4f26';
+  var SEL_SET_REFERRER = '0xa18a7bfc';   // setReferrer(address)
+  var SEL_REFERRER = '0x2cf003c2';       // referrer(address)
+  var SEL_TEAM = '0x615f36a9';           // getTeamVolume(address)         下线业绩
+  var SEL_OWN_TEAM = '0x9933e53b';       // getPersonalPlusTeamVolume(address) 本人+下线
+
+  function eth() {
+    return window.__FARM_ETH__ || window.ethereum || null;
+  }
+  function wallet() {
+    return window.ethereum || null;
+  }
+  function pad32(addr) {
+    return String(addr).toLowerCase().replace(/^0x/, '').padStart(64, '0');
+  }
+  function isAddr(s) {
+    return /^0x[0-9a-fA-F]{40}$/.test(String(s || '').trim());
+  }
+  function fmt18(hexOrBig) {
+    try {
+      var v = typeof hexOrBig === 'bigint' ? hexOrBig : BigInt(hexOrBig);
+      var whole = v / 1000000000000000000n;
+      var frac = (v % 1000000000000000000n).toString().padStart(18, '0').slice(0, 4);
+      return whole.toString() + '.' + frac;
+    } catch (e) { return '-'; }
+  }
+
+  function call(to, data) {
+    var e = eth();
+    if (!e) return Promise.reject(new Error('RPC 不可用'));
+    return e.request({ method: 'eth_call', params: [{ to: to, data: data }, 'latest'] });
+  }
+
+  function readReferrer(account) {
+    return call(FARM, SEL_REFERRER + pad32(account)).then(function (r) {
+      if (!r || r === '0x') return '0x0000000000000000000000000000000000000000';
+      return '0x' + r.slice(-40);
+    });
+  }
+  function readVolume(selector, account) {
+    return call(FARM, selector + pad32(account)).then(function (r) {
+      return r && r !== '0x' ? BigInt(r) : 0n;
+    }).catch(function () { return 0n; });
+  }
+
+  var el, body, statusEl, inputEl, btnEl, hintEl, teamEl, ownEl, toggleEl;
+  var account = null;
+  var bound = null;
+
+  function setStatus(text, tone) {
+    if (!statusEl) return;
+    statusEl.textContent = text;
+    statusEl.style.color = tone === 'ok' ? '#34d399' : tone === 'warn' ? '#fbbf24' : tone === 'err' ? '#f87171' : '#cbd5e1';
+  }
+
+  function refresh() {
+    var w = wallet();
+    if (!w) { setStatus('未检测到钱包，请在钱包内置浏览器打开', 'warn'); return; }
+    // eth_accounts does not prompt; only bind() asks for authorization, so the
+    // wallet is not popped up on every page load.
+    return w.request({ method: 'eth_accounts' }).then(function (accs) {
+      account = accs && accs[0] ? accs[0] : null;
+      if (!account) {
+        setStatus('钱包未连接 —— 绑定时会自动请求连接', 'warn');
+        inputEl.disabled = false;
+        btnEl.disabled = false;
+        btnEl.textContent = '连接钱包并绑定';
+        hintEl.textContent = '点上面的按钮会先请求钱包授权，再发起绑定交易。';
+        teamEl.textContent = '-';
+        ownEl.textContent = '-';
+        return;
+      }
+      return readReferrer(account).then(function (up) {
+        bound = up && up !== '0x0000000000000000000000000000000000000000' ? up : null;
+        if (bound) {
+          setStatus('已绑定上级：' + bound.slice(0, 6) + '…' + bound.slice(-4), 'ok');
+          inputEl.value = '';
+          inputEl.disabled = true;
+          btnEl.disabled = true;
+          btnEl.textContent = '已绑定（不可更改）';
+          hintEl.textContent = '绑定关系一经写入不可撤销，也不能改绑。';
+        } else {
+          setStatus('未绑定上级 —— 现在下注会被拒绝', 'err');
+          inputEl.disabled = false;
+          btnEl.disabled = false;
+          btnEl.textContent = '绑定上级';
+          hintEl.textContent = '必须先把上级地址绑定到你自己的地址上，才能下注。上级本身也必须已经绑定过上级。';
+        }
+        return Promise.all([
+          readVolume(SEL_TEAM, account),
+          readVolume(SEL_OWN_TEAM, account)
+        ]).then(function (v) {
+          teamEl.textContent = fmt18(v[0]);
+          ownEl.textContent = fmt18(v[1]);
+        });
+      });
+    }).catch(function (e) {
+      setStatus('读取失败：' + (e && e.message ? e.message.slice(0, 40) : '未知错误'), 'err');
+    });
+  }
+
+  /// Polls referrer() until the binding is visible on chain (max ~60s).
+  function waitBound(target, tries) {
+    if (!account) return;
+    readReferrer(account).then(function (up) {
+      if (up && up.toLowerCase() === String(target).toLowerCase()) {
+        hintEl.textContent = '绑定成功。';
+        refresh();
+        return;
+      }
+      if (tries >= 20) {
+        hintEl.textContent = '仍未检测到绑定，请稍后刷新页面确认。';
+        btnEl.disabled = false;
+        btnEl.textContent = '绑定上级';
+        return;
+      }
+      hintEl.textContent = '等待上链确认…（' + (tries + 1) + '/20）';
+      setTimeout(function () { waitBound(target, tries + 1); }, 3000);
+    }).catch(function () {
+      setTimeout(function () { waitBound(target, tries + 1); }, 3000);
+    });
+  }
+
+  function bind() {
+    var target = String(inputEl.value || '').trim();
+    if (!isAddr(target)) { hintEl.textContent = '请输入合法的 0x 地址（40 位十六进制）。'; return; }
+    var w = wallet();
+    if (!w) { hintEl.textContent = '未检测到钱包。'; return; }
+
+    btnEl.disabled = true;
+    btnEl.textContent = '等待钱包确认…';
+    hintEl.textContent = '';
+
+    var ensure = account
+      ? Promise.resolve(account)
+      : w.request({ method: 'eth_requestAccounts' }).then(function (accs) {
+          account = accs && accs[0] ? accs[0] : null;
+          if (!account) throw new Error('未授权钱包账户');
+          return account;
+        });
+
+    ensure.then(function (from) {
+      if (target.toLowerCase() === String(from).toLowerCase()) {
+        throw new Error('SelfReferrer');
+      }
+      return w.request({
+        method: 'eth_sendTransaction',
+        params: [{ from: from, to: FARM, data: SEL_SET_REFERRER + pad32(target) }]
+      });
+    }).then(function () {
+      btnEl.textContent = '已提交，等待上链…';
+      hintEl.textContent = '等待上链确认…';
+      waitBound(target, 0);
+    }).catch(function (e) {
+      var msg = (e && (e.message || (e.data && e.data.message))) || '';
+      if (/user rejected|denied/i.test(msg)) msg = '你取消了签名。';
+      else if (/TooManyLegs/.test(msg)) msg = '该上级的直推人数已满 50 人（MAX_LEGS），无法再绑定。';
+      else if (/ReferrerAlreadySet/.test(msg)) msg = '你已经绑定过上级，不能改绑。';
+      else if (/CannotBindDownline/.test(msg)) msg = '不能绑定自己的下级。';
+      else if (/SelfReferrer/.test(msg)) msg = '不能绑定自己。';
+      else if (/ReferrerZero/.test(msg)) msg = '上级地址不能是零地址。';
+      hintEl.textContent = msg ? msg.slice(0, 120) : '绑定失败，请稍后重试。';
+      btnEl.disabled = false;
+      btnEl.textContent = '绑定上级';
+    });
+  }
+
+  function build() {
+    if (document.getElementById('ref-panel')) return;
+
+    var css = document.createElement('style');
+    css.textContent = [
+      '#ref-panel{position:fixed;right:12px;bottom:12px;width:300px;z-index:2147483646;',
+      'font:13px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif;color:#e2e8f0;',
+      'background:rgba(15,23,42,.96);border:1px solid rgba(148,163,184,.28);border-radius:12px;',
+      'box-shadow:0 10px 30px rgba(0,0,0,.45);overflow:hidden}',
+      '#ref-panel .rp-head{display:flex;align-items:center;justify-content:space-between;',
+      'padding:8px 12px;background:rgba(30,41,59,.9);cursor:pointer;user-select:none}',
+      '#ref-panel .rp-title{font-weight:600;font-size:12px;letter-spacing:.02em}',
+      '#ref-panel .rp-body{padding:10px 12px 12px;display:flex;flex-direction:column;gap:8px}',
+      '#ref-panel.rp-collapsed .rp-body{display:none}',
+      '#ref-panel .rp-status{font-size:12px;word-break:break-all}',
+      '#ref-panel input{width:100%;box-sizing:border-box;padding:7px 9px;border-radius:7px;',
+      'border:1px solid rgba(148,163,184,.35);background:rgba(2,6,23,.85);color:#e2e8f0;font:12px/1.4 monospace}',
+      '#ref-panel input:disabled{opacity:.55}',
+      '#ref-panel button{width:100%;padding:8px;border:0;border-radius:7px;cursor:pointer;',
+      'background:#0f766e;color:#fff;font-weight:600;font-size:12px}',
+      '#ref-panel button:hover:not(:disabled){background:#0d9488}',
+      '#ref-panel button:disabled{background:#334155;cursor:default;opacity:.8}',
+      '#ref-panel .rp-hint{font-size:11px;color:#94a3b8;line-height:1.45}',
+      '#ref-panel .rp-kv{display:flex;justify-content:space-between;font-size:11px;color:#94a3b8}',
+      '#ref-panel .rp-kv b{color:#e2e8f0;font-weight:600;font-variant-numeric:tabular-nums}',
+      '#ref-panel .rp-sep{height:1px;background:rgba(148,163,184,.2);margin:2px 0}',
+      '@media (max-width:560px){#ref-panel{width:calc(100% - 24px);left:12px;right:12px;bottom:56px}}'
+    ].join('');
+    document.head.appendChild(css);
+
+    el = document.createElement('div');
+    el.id = 'ref-panel';
+    el.innerHTML = [
+      '<div class="rp-head"><span class="rp-title">推荐关系 / 业绩</span><span id="rp-toggle">−</span></div>',
+      '<div class="rp-body">',
+      '<div class="rp-status" id="rp-status">正在读取…</div>',
+      '<input id="rp-input" placeholder="上级钱包地址 0x…" autocomplete="off" spellcheck="false" />',
+      '<button id="rp-btn" type="button">绑定上级</button>',
+      '<div class="rp-hint" id="rp-hint"></div>',
+      '<div class="rp-sep"></div>',
+      '<div class="rp-kv"><span>团队业绩（下线）</span><b id="rp-team">-</b></div>',
+      '<div class="rp-kv"><span>本人 + 团队</span><b id="rp-own">-</b></div>',
+      '</div>'
+    ].join('');
+    document.body.appendChild(el);
+
+    body = el.querySelector('.rp-body');
+    statusEl = document.getElementById('rp-status');
+    inputEl = document.getElementById('rp-input');
+    btnEl = document.getElementById('rp-btn');
+    hintEl = document.getElementById('rp-hint');
+    teamEl = document.getElementById('rp-team');
+    ownEl = document.getElementById('rp-own');
+    toggleEl = document.getElementById('rp-toggle');
+
+    // On narrow screens start collapsed so the panel does not cover the bet form.
+    if (window.innerWidth && window.innerWidth < 560) {
+      el.classList.add('rp-collapsed');
+      toggleEl.textContent = '+';
+    }
+    el.querySelector('.rp-head').addEventListener('click', function () {
+      var collapsed = el.classList.toggle('rp-collapsed');
+      toggleEl.textContent = collapsed ? '+' : '−';
+    });
+    btnEl.addEventListener('click', bind);
+    inputEl.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') bind();
+    });
+
+    var w = wallet();
+    if (w && w.on) {
+      w.on('accountsChanged', function () { refresh(); });
+      w.on('chainChanged', function () { setTimeout(refresh, 300); });
+    }
+    refresh();
+    setInterval(function () { if (!document.hidden) refresh(); }, 30000);
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', build);
+  } else {
+    build();
+  }
+})();
+</script>
+</body></html>
