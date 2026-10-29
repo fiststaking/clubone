@@ -1,10 +1,10 @@
-<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"/><link rel="icon" href="./favicon.ico"/><meta name="viewport" content="width=device-width,initial-scale=1"/><meta name="theme-color" content="#070c16"/><meta name="description" content="FIST 生态农场：基于 BNB Smart Chain 的链上单双竞猜协议，猜中 1.95 倍，支持多代币与团队级差奖励。"/><link rel="apple-touch-icon" href="./logo192.png"/><link rel="manifest" href="./manifest.json"/><title>FIST 生态农场 · 链上单双竞猜</title><script>
+﻿<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"/><link rel="icon" href="./favicon.ico"/><meta name="viewport" content="width=device-width,initial-scale=1"/><meta name="theme-color" content="#070c16"/><meta name="description" content="FIST 生态农场：基于 BNB Smart Chain 的链上农场游戏协议，猜中 1.95 奖励，支持多代币与团队级差奖励。"/><link rel="apple-touch-icon" href="./logo192.png"/><link rel="manifest" href="./manifest.json"/><title>FIST 生态农场 · 链上农场游戏</title><script>
 /* ══ BSC RPC 通道白名单 + 自动故障转移 ══════════════════════════════════════
    通道来源: warstaking 实测白名单 (国内直连优先, 海外镜像兜底), 已逐个实测
    eth_chainId == 0x38。策略与上游一致: 并行探测延迟 → 升序排名 → 失败自动切下一通道。
    ⚠️ 避坑: 原产物把 RPC 写死为单个 bsc-dataseed.binance.org 且回退到自己(等于无回退),
       该节点按 IP 限流, 一旦抖动整页读不出数据。此处仅接管「只读」调用;
-      下注/授权/签名等写操作仍然走 window.ethereum, 私钥与签名不离开钱包。 */
+      参与游戏/授权/签名等写操作仍然走 window.ethereum, 私钥与签名不离开钱包。 */
 (function () {
   'use strict';
   var CHAIN_ID = '0x38';
@@ -160,10 +160,10 @@
   setInterval(rank, 120000);
 })();
 </script>
-<script defer="defer" src="./static/js/main.25b950d1.js"></script><link href="./static/css/main.c0ab5cf0.css" rel="stylesheet"></head><body><noscript>请启用 JavaScript 后使用本应用。</noscript><div id="root"></div><style>#back-home{position:fixed;left:12px;bottom:12px;z-index:2147483647;display:inline-flex;align-items:center;gap:6px;padding:8px 12px;border-radius:999px;background:rgba(15,118,110,.92);color:#fff;font:600 12px/1 system-ui,-apple-system,"Segoe UI",sans-serif;text-decoration:none;box-shadow:0 6px 18px rgba(0,0,0,.35)}#back-home:hover{background:#0d9488}</style><a id="back-home" href="../" aria-label="返回主站">← 返回主站</a><script>
+<script defer="defer" src="./static/js/main.ea8cb2d5.js"></script><link href="./static/css/main.c0ab5cf0.css" rel="stylesheet"></head><body><noscript>请启用 JavaScript 后使用本应用。</noscript><div id="root"></div><style>#back-home{position:fixed;left:12px;bottom:12px;z-index:2147483647;display:inline-flex;align-items:center;gap:6px;padding:8px 12px;border-radius:999px;background:rgba(15,118,110,.92);color:#fff;font:600 12px/1 system-ui,-apple-system,"Segoe UI",sans-serif;text-decoration:none;box-shadow:0 6px 18px rgba(0,0,0,.35)}#back-home:hover{background:#0d9488}</style><a id="back-home" href="../" aria-label="返回主站">← 返回主站</a><script>
 /* ══ 推荐关系绑定面板 ══════════════════════════════════════════════════════
    为什么需要这个面板：新版 FarmGuess 的 placeBet() 强制要求 referrer != 0，
-   未绑定的地址下注会直接 revert ReferrerRequired()。而 React 产物里没有绑定入口，
+   未绑定的地址参与游戏会直接 revert ReferrerRequired()。而 React 产物里没有绑定入口，
    所以这里补一个独立面板（只做 setReferrer / referrer 两个调用，不碰游戏逻辑）。
 
    读写通道：
@@ -174,7 +174,7 @@
 (function () {
   'use strict';
 
-  var FARM = '0x25B950D127E4536013A3d014b21A04d1B1646c0B';
+  var FARM = '0xea8cb2d57d40dafac22b24fde661dd6b64f90848';
   var SEL_SET_REFERRER = '0xa18a7bfc';   // setReferrer(address)
   var SEL_REFERRER = '0x2cf003c2';       // referrer(address)
   var SEL_TEAM = '0x615f36a9';           // getTeamVolume(address)         下线业绩
@@ -268,7 +268,7 @@
 
         if (isRoot) {
           // The network root is the one address exempt from the binding rule.
-          setStatus('网络根地址（' + account.slice(0, 6) + '…' + account.slice(-4) + '）—— 无需绑定，可直接下注', 'ok');
+          setStatus('网络根地址（' + account.slice(0, 6) + '…' + account.slice(-4) + '）—— 无需绑定，可直接参与游戏', 'ok');
           inputEl.value = '';
           inputEl.disabled = true;
           btnEl.disabled = true;
@@ -282,7 +282,7 @@
           btnEl.textContent = '已绑定（不可更改）';
           hintEl.textContent = '绑定关系一经写入不可撤销，也不能改绑。';
         } else {
-          setStatus('未绑定上级 —— 现在下注会被拒绝', 'err');
+          setStatus('未绑定上级 —— 现在参与游戏会被拒绝', 'err');
           inputEl.disabled = false;
           btnEl.disabled = false;
           btnEl.textContent = '绑定上级';
